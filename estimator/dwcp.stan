@@ -16,9 +16,8 @@ data {
   /////////////////////
   // standard deviation of nuclear norm prior
   real<lower=0> sigma_L;
-  // hyperparameter for unit distance weight
+  // hyperparameter for unit and time distance weights
   real<lower=0> lambda_N;
-  // hyperparameter for time distance weight
   real<lower=0> lambda_T;
 }
 
@@ -56,11 +55,14 @@ transformed data {
   // Time and Unit Weights (DWCP) //
   /////////////////////////////////
   // getting adoption times for each unit
+  // marking treated units
   vector[N] adoption_times = rep_vector(2 * T, N);
+  vector[N] treated_units = rep_vector(0, N);
   for (n in 1:N) {
     int counter = 1;
     for (t in 1:T) {
       if (W[n, t] == 1) {
+        treated_units[n] = 1;
         adoption_times[n] = counter;
         break;
       }
@@ -77,26 +79,29 @@ transformed data {
     int n = observed_indices[i, 1];
     int t = observed_indices[i, 2];
     // time-distance is the shortest time to nearest adoption-time across all units
-    time_distance[i] = quantile(abs(adoption_times - t), 0.5);
+    time_distance[i] = norm2((adoption_times - t) .* treated_units);
 
     // calculating unit-distance
     // calculating ||Y_n - Y_j||^2 for all j in [N]
     matrix[N, T] unit_shift_matrix = (Y_std -  rep_matrix(Y_std[n, : ], N)) ;
     vector[N] unit_distance_vector = (unit_shift_matrix .* unit_shift_matrix) * rep_vector(1, T);
-    // calculating mean distance from non-self treated units 
-    real unit_distance_total = 0;
-    int unit_distance_count = 0;
-    for (unit in 1:N) {
-      if (sum(W[unit, : ]) > 0 && unit != n) {
-        unit_distance_total += unit_distance_vector[unit];
-        unit_distance_count += 1;
-      }
-    }
-    unit_distance[i] = unit_distance_total / unit_distance_count;
+    // // calculating mean distance from non-self treated units 
+    // real unit_distance_total = 0;
+    // int unit_distance_count = 0;
+    // for (unit in 1:N) {
+    //   if (sum(W[unit, : ]) > 0 && unit != n) {
+    //     unit_distance_total += unit_distance_vector[unit];
+    //     unit_distance_count += 1;
+    //   }
+    // }
+    unit_distance[i] = norm2(unit_distance_vector .* treated_units);
 
     // calculating DWCP weights
-    dwcp_weights[i] = exp(-lambda_T * time_distance[i] - lambda_N * unit_distance[i]);
+    dwcp_weights[i] = exp(-(lambda_T * time_distance[i] + lambda_N * unit_distance[i]));
   }
+
+  // normalizing weights
+  dwcp_weights = (dwcp_weights / sum(dwcp_weights)) * O;
 }
 
 parameters {
@@ -124,7 +129,11 @@ transformed parameters {
   for (i in 1:O) {
     int n = observed_indices[i, 1];
     int t = observed_indices[i, 2];
-    Y_std_hat[i] = alpha_std[n] + gamma_std[t] + L_std[n, t];
+    if (sigma_L > 0) {
+      Y_std_hat[i] = alpha_std[n] + gamma_std[t] + L_std[n, t];
+    } else {
+      Y_std_hat[i] = alpha_std[n] + gamma_std[t];
+    }
   }
 }
 
@@ -140,8 +149,10 @@ model {
 
 
   // setting prior on L_std
-  real nuclear_norm_L_std = sum(singular_values(L_std));
-  nuclear_norm_L_std ~ normal(0, sigma_L);
+  if (sigma_L > 0) {
+    real nuclear_norm_L_std = sum(singular_values(L_std));
+    nuclear_norm_L_std ~ normal(0, sigma_L);
+  }
 
   // adding data to likelihood
   {
